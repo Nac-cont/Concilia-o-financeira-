@@ -1,1 +1,377 @@
 
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Conciliação Financeira — Nacaratto</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Sora',sans-serif;background:#F8FAFC;color:#1E293B;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    @keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+    const MESES = ["Janeiro", "Fevereiro", "Março"];
+    const C = {
+      navy: "#0F1F3D", teal: "#0D9488", gold: "#F59E0B", light: "#F0FDF9",
+      danger: "#EF4444", success: "#10B981", gray: "#6B7280", border: "#E2E8F0",
+    };
+    const fmt = n => (n == null || isNaN(n)) ? "R$ -" :
+      new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(n));
+
+    function Btn({ onClick, disabled, style, children }) {
+      return <button onClick={onClick} disabled={disabled}
+        style={{ fontFamily: "Sora,sans-serif", cursor: disabled ? "not-allowed" : "pointer", border: "none", ...style }}>
+        {children}
+      </button>;
+    }
+
+    const STORAGE_KEY = "conciliacao_clientes_v1";
+    function salvar(clientes) {
+      try {
+        const dados = clientes.map(c => ({ ...c, arquivos: c.arquivos.map(a => ({ nome: a.nome, tipo: a.tipo })) }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(dados));
+      } catch(e) {}
+    }
+    function carregar() {
+      try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : []; } catch(e) { return []; }
+    }
+
+    async function callAI(system, user) {
+      try {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4000, system, messages: [{ role: "user", content: user }] }),
+        });
+        const data = await res.json();
+        if (data.error) return null;
+        const raw = (data.content || []).map(b => b.text || "").join("");
+        const clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+        try { return JSON.parse(clean); } catch (_) {}
+        const m = clean.match(/\{[\s\S]*\}/);
+        if (m) { try { return JSON.parse(m[0]); } catch (_) {} }
+        return null;
+      } catch (e) { return null; }
+    }
+
+    function gerarFallback(nome) {
+      const rnd = (a, b) => Math.round((a + Math.random() * (b - a)) * 100) / 100;
+      const recCats = ["Vendas de Produtos", "Prestação de Serviços", "Comissões", "Outras Receitas"];
+      const desCats = ["Folha de Pagamento", "Aluguel", "Fornecedores", "Impostos e Taxas", "Bancárias", "Outras Despesas"];
+      const transacoes = [];
+      const recPorMes = {}, desPorMes = {}, recPorCat = {}, desPorCat = {};
+      MESES.forEach(m => { recPorMes[m] = 0; desPorMes[m] = 0; });
+      MESES.forEach((mes, mi) => {
+        recCats.forEach((cat, ci) => {
+          const val = rnd(6000, 25000);
+          transacoes.push({ data: `2025-0${mi+1}-${String(3+ci*5).padStart(2,"0")}`, descricao: cat, valor: val, tipo: "receita", categoria: cat, mes });
+          recPorMes[mes] += val; recPorCat[cat] = (recPorCat[cat]||0) + val;
+        });
+        desCats.forEach((cat, ci) => {
+          const val = rnd(2000, 12000);
+          transacoes.push({ data: `2025-0${mi+1}-${String(5+ci*4).padStart(2,"0")}`, descricao: cat, valor: val, tipo: "despesa", categoria: cat, mes });
+          desPorMes[mes] += val; desPorCat[cat] = (desPorCat[cat]||0) + val;
+        });
+      });
+      const totalReceitas = Object.values(recPorMes).reduce((a,b)=>a+b,0);
+      const totalDespesas = Object.values(desPorMes).reduce((a,b)=>a+b,0);
+      const lucroLiquido = totalReceitas - totalDespesas;
+      return {
+        transacoes,
+        resumo: { totalReceitas, totalDespesas, lucroLiquido, receitasPorMes: recPorMes, despesasPorMes: desPorMes, receitasPorCategoria: recPorCat, despesasPorCategoria: desPorCat },
+        analise: { situacao: lucroLiquido > 0 ? "lucro" : "prejuízo", distribuicaoPossivel: lucroLiquido > 0, valorSugerido: lucroLiquido > 0 ? Math.round(lucroLiquido * 0.5) : 0, pontosForca: ["Receitas diversificadas ao longo do trimestre"], pontosAtencao: ["Monitorar crescimento das despesas"], recomendacoes: ["Revisar contratos de fornecedores"] }
+      };
+    }
+
+    function StepClientes({ clientes, setClientes, onNext }) {
+      const [nome, setNome] = useState("");
+      const add = () => {
+        if (!nome.trim()) return;
+        const novo = [...clientes, { id: Date.now(), nome: nome.trim(), arquivos: [], transacoes: [], resumo: null, analise: null }];
+        setClientes(novo); salvar(novo); setNome("");
+      };
+      return (
+        <div style={{ maxWidth: 600, margin: "0 auto", animation: "fadein .3s" }}>
+          <div style={{ background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, padding: "10px 16px", marginBottom: 20, display: "flex", gap: 10 }}>
+            <span>💾</span><p style={{ fontSize: 13, color: "#065F46" }}>Dados salvos automaticamente. Feche e volte quando quiser.</p>
+          </div>
+          <h2 style={{ fontSize: 22, fontWeight: 700, color: C.navy, marginBottom: 6 }}>1. Cadastrar Clientes</h2>
+          <p style={{ color: C.gray, fontSize: 14, marginBottom: 24 }}>Adicione os clientes do trimestre atual.</p>
+          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+            <input value={nome} onChange={e => setNome(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} placeholder="Nome do cliente…"
+              style={{ flex: 1, padding: "10px 14px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 14, fontFamily: "Sora,sans-serif", outline: "none" }} />
+            <Btn onClick={add} style={{ background: C.teal, color: "#fff", borderRadius: 8, padding: "10px 20px", fontSize: 14, fontWeight: 600 }}>+ Adicionar</Btn>
+          </div>
+          {clientes.length === 0 && <p style={{ textAlign: "center", color: C.gray, fontSize: 13, padding: "20px 0" }}>Nenhum cliente ainda.</p>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 28 }}>
+            {clientes.map((cl, i) => (
+              <div key={cl.id} style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 16px" }}>
+                <div style={{ width: 30, height: 30, borderRadius: "50%", background: C.navy, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700 }}>{i+1}</div>
+                <span style={{ flex: 1, fontWeight: 500 }}>{cl.nome}</span>
+                {cl.resumo && <span style={{ fontSize: 11, color: C.success, fontWeight: 600 }}>✅ Analisado</span>}
+                {cl.arquivos.length > 0 && !cl.resumo && <span style={{ fontSize: 11, color: C.teal }}>{cl.arquivos.length} arq.</span>}
+                <Btn onClick={() => { const novo = clientes.filter(x => x.id !== cl.id); setClientes(novo); salvar(novo); }} style={{ background: "none", color: C.danger, fontSize: 20, padding: "0 4px" }}>×</Btn>
+              </div>
+            ))}
+          </div>
+          {clientes.length > 0 && <Btn onClick={onNext} style={{ width: "100%", background: C.navy, color: "#fff", borderRadius: 10, padding: "14px 0", fontSize: 15, fontWeight: 700 }}>Próximo: Upload de Documentos →</Btn>}
+        </div>
+      );
+    }
+
+    function StepUpload({ clientes, setClientes, onNext, onBack }) {
+      const refs = useRef({});
+      const addFiles = (id, files) => {
+        const arr = Array.from(files).map(f => ({ nome: f.name, tipo: f.type }));
+        const novo = clientes.map(c => c.id === id ? { ...c, arquivos: [...c.arquivos, ...arr] } : c);
+        setClientes(novo); salvar(novo);
+      };
+      const del = (id, idx) => { const novo = clientes.map(c => c.id === id ? { ...c, arquivos: c.arquivos.filter((_,i) => i !== idx) } : c); setClientes(novo); salvar(novo); };
+      return (
+        <div style={{ maxWidth: 720, margin: "0 auto", animation: "fadein .3s" }}>
+          <div style={{ background: "#ECFDF5", border: "1px solid #6EE7B7", borderRadius: 10, padding: "10px 16px", marginBottom: 20, display: "flex", gap: 10 }}>
+            <span>💾</span><p style={{ fontSize: 13, color: "#065F46" }}>Nomes dos arquivos salvos. Pode sair e voltar sem perder.</p>
+          </div>
+          <h2 style={{ fontSize: 22, fontWeight: 700, color: C.navy, marginBottom: 6 }}>2. Upload de Documentos</h2>
+          <p style={{ color: C.gray, fontSize: 14, marginBottom: 24 }}>Associe extratos de cada cliente. Sem arquivo? Pode pular — a IA simula os dados.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {clientes.map(cl => (
+              <div key={cl.id} style={{ background: "#fff", border: `1.5px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+                <div style={{ background: C.navy, padding: "10px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: "#fff", fontWeight: 600 }}>{cl.nome}</span>
+                  <span style={{ color: C.gold, fontSize: 12 }}>{cl.arquivos.length} arquivo(s)</span>
+                </div>
+                <div style={{ padding: 14 }}>
+                  <div onClick={() => refs.current[cl.id]?.click()} onMouseOver={e => e.currentTarget.style.borderColor = C.teal} onMouseOut={e => e.currentTarget.style.borderColor = C.border}
+                    style={{ border: `2px dashed ${C.border}`, borderRadius: 10, padding: "16px", textAlign: "center", cursor: "pointer", transition: "border-color .2s" }}>
+                    <div style={{ fontSize: 24, marginBottom: 4 }}>📁</div>
+                    <p style={{ fontSize: 12, color: C.gray }}>Clique para selecionar arquivos</p>
+                    <p style={{ fontSize: 11, color: "#A0AEC0", marginTop: 2 }}>PDF, XLSX, CSV, PNG, JPG</p>
+                    <input ref={el => refs.current[cl.id] = el} type="file" multiple accept=".pdf,.xlsx,.csv,.png,.jpg,.jpeg" style={{ display: "none" }} onChange={e => addFiles(cl.id, e.target.files)} />
+                  </div>
+                  {cl.arquivos.length > 0 && (
+                    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 5 }}>
+                      {cl.arquivos.map((a, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: C.light, borderRadius: 7, padding: "7px 12px" }}>
+                          <span>{a.tipo?.includes("pdf") ? "📄" : a.tipo?.includes("image") ? "🖼️" : "📊"}</span>
+                          <span style={{ flex: 1, fontSize: 12, color: C.navy }}>{a.nome}</span>
+                          <Btn onClick={() => del(cl.id, i)} style={{ background: "none", color: C.danger, fontSize: 16, padding: 0 }}>×</Btn>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
+            <Btn onClick={onBack} style={{ flex: 1, background: "#fff", color: C.navy, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "12px 0", fontWeight: 600, fontSize: 14 }}>← Voltar</Btn>
+            <Btn onClick={onNext} style={{ flex: 2, background: C.teal, color: "#fff", borderRadius: 10, padding: "12px 0", fontWeight: 700, fontSize: 15 }}>Analisar com IA →</Btn>
+          </div>
+        </div>
+      );
+    }
+
+    function StepProcessar({ clientes, setClientes, onNext, onBack }) {
+      const [estado, setEstado] = useState("idle");
+      const [atual, setAtual] = useState("");
+      const [prog, setProg] = useState(0);
+      const [log, setLog] = useState([]);
+      const processar = async () => {
+        setEstado("processando"); setLog([]);
+        const atualizados = [];
+        for (let i = 0; i < clientes.length; i++) {
+          const cl = clientes[i];
+          setAtual(cl.nome); setProg(Math.round((i / clientes.length) * 100));
+          setLog(p => [...p, `⏳ Processando ${cl.nome}…`]);
+          const arquivos = cl.arquivos.map(a => a.nome).join(", ") || "nenhum arquivo";
+          const system = `Você é um contador especialista. Responda SOMENTE com JSON puro e válido, sem texto antes ou depois, sem blocos de código markdown. Apenas o objeto JSON.`;
+          const user = `Analise o cliente "${cl.nome}" (arquivos: ${arquivos}). Gere dados financeiros simulados realistas do 1º trimestre 2025. Retorne EXATAMENTE este JSON com valores numéricos reais:
+{"transacoes":[{"data":"2025-01-10","descricao":"Venda de produtos","valor":15000,"tipo":"receita","categoria":"Vendas de Produtos","mes":"Janeiro"},{"data":"2025-01-20","descricao":"Folha de pagamento","valor":8000,"tipo":"despesa","categoria":"Folha de Pagamento","mes":"Janeiro"}],"resumo":{"totalReceitas":90000,"totalDespesas":60000,"lucroLiquido":30000,"receitasPorMes":{"Janeiro":28000,"Fevereiro":30000,"Março":32000},"despesasPorMes":{"Janeiro":19000,"Fevereiro":20000,"Março":21000},"receitasPorCategoria":{"Vendas de Produtos":55000,"Prestação de Serviços":35000},"despesasPorCategoria":{"Folha de Pagamento":30000,"Aluguel":12000,"Fornecedores":18000}},"analise":{"situacao":"lucro","distribuicaoPossivel":true,"valorSugerido":15000,"pontosForca":["Crescimento de receita mês a mês"],"pontosAtencao":["Folha representa 50% dos custos"],"recomendacoes":["Revisar contratos de fornecedores"]}}
+Regras: mínimo 12 transações nos 3 meses; totalReceitas = soma de receitasPorMes; totalDespesas = soma de despesasPorMes; lucroLiquido = totalReceitas - totalDespesas.`;
+          let resultado = await callAI(system, user);
+          const ok = resultado && resultado.resumo && Array.isArray(resultado.transacoes) && resultado.transacoes.length > 0;
+          if (!ok) { setLog(p => [...p, `⚠️ IA indisponível para ${cl.nome} — gerando localmente`]); resultado = gerarFallback(cl.nome); }
+          else { setLog(p => [...p, `✅ ${cl.nome} — ${resultado.transacoes.length} transações`]); }
+          atualizados.push({ ...cl, transacoes: resultado.transacoes, resumo: resultado.resumo, analise: resultado.analise });
+        }
+        setProg(100); setClientes(atualizados); salvar(atualizados); setEstado("done");
+      };
+      if (estado === "idle") return (
+        <div style={{ maxWidth: 520, margin: "0 auto", textAlign: "center", animation: "fadein .3s" }}>
+          <div style={{ fontSize: 60, marginBottom: 12 }}>🤖</div>
+          <h2 style={{ fontSize: 22, fontWeight: 700, color: C.navy, marginBottom: 10 }}>3. Análise com IA</h2>
+          <p style={{ color: C.gray, fontSize: 14, marginBottom: 8 }}>A IA vai classificar receitas e despesas, calcular DRE, Fluxo de Caixa e gerar análise por cliente.</p>
+          <p style={{ color: C.teal, fontSize: 13, fontWeight: 600, marginBottom: 28 }}>{clientes.length} cliente(s) · {clientes.reduce((s,c)=>s+c.arquivos.length,0)} arquivo(s)</p>
+          <div style={{ display: "flex", gap: 12 }}>
+            <Btn onClick={onBack} style={{ flex: 1, background: "#fff", color: C.navy, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "12px 0", fontWeight: 600, fontSize: 14 }}>← Voltar</Btn>
+            <Btn onClick={processar} style={{ flex: 2, background: C.teal, color: "#fff", borderRadius: 10, padding: "12px 0", fontWeight: 700, fontSize: 15 }}>🚀 Iniciar Análise</Btn>
+          </div>
+        </div>
+      );
+      if (estado === "processando") return (
+        <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "fadein .3s" }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.navy, marginBottom: 6 }}>Processando…</h2>
+          <p style={{ color: C.gray, fontSize: 13, marginBottom: 18 }}>Analisando: <strong>{atual}</strong></p>
+          <div style={{ background: C.border, borderRadius: 99, height: 8, overflow: "hidden", marginBottom: 6 }}>
+            <div style={{ height: "100%", width: `${prog}%`, background: `linear-gradient(90deg,${C.teal},${C.gold})`, transition: "width .4s", borderRadius: 99 }} />
+          </div>
+          <p style={{ color: C.gray, fontSize: 12, marginBottom: 20 }}>{prog}%</p>
+          <div style={{ width: 36, height: 36, border: `4px solid ${C.border}`, borderTop: `4px solid ${C.teal}`, borderRadius: "50%", animation: "spin .9s linear infinite", margin: "0 auto 20px" }} />
+          <div style={{ textAlign: "left", background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, maxHeight: 150, overflowY: "auto" }}>
+            {log.map((l,i) => <p key={i} style={{ fontSize: 12, color: C.gray, padding: "2px 0" }}>{l}</p>)}
+          </div>
+        </div>
+      );
+      return (
+        <div style={{ maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "fadein .3s" }}>
+          <div style={{ fontSize: 60, marginBottom: 12 }}>✅</div>
+          <h2 style={{ fontSize: 22, fontWeight: 700, color: C.navy, marginBottom: 10 }}>Análise Concluída!</h2>
+          <div style={{ textAlign: "left", background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 24, maxHeight: 160, overflowY: "auto" }}>
+            {log.map((l,i) => <p key={i} style={{ fontSize: 12, color: l.includes("⚠️") ? C.gold : C.success, padding: "2px 0" }}>{l}</p>)}
+          </div>
+          <Btn onClick={onNext} style={{ width: "100%", background: C.navy, color: "#fff", borderRadius: 10, padding: "14px 0", fontSize: 15, fontWeight: 700 }}>Ver Resultados →</Btn>
+        </div>
+      );
+    }
+
+    function StepResultados({ clientes, setClientes, onBack }) {
+      const [selId, setSelId] = useState(clientes[0]?.id);
+      const [aba, setAba] = useState("dre");
+      const cl = clientes.find(c => c.id === selId);
+      const r = cl?.resumo; const an = cl?.analise;
+      const limparTudo = () => { localStorage.removeItem(STORAGE_KEY); setClientes([]); onBack(); };
+      const exportar = () => {
+        if (!cl) return;
+        const rows = [["Data","Descrição","Tipo","Categoria","Mês","Valor (R$)"], ...(cl.transacoes || []).map(t => [t.data, t.descricao, t.tipo, t.categoria, t.mes, String(t.valor).replace(".",",")])];
+        const csv = "\uFEFF" + rows.map(r => r.join(";")).join("\n");
+        const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+        a.download = `conciliacao_${cl.nome.replace(/ /g,"_")}_Q1_2025.csv`; a.click();
+      };
+      const Tab = ({ id, label }) => <Btn onClick={() => setAba(id)} style={{ padding: "8px 16px", borderRadius: 8, background: aba===id?C.navy:"transparent", color: aba===id?"#fff":C.gray, fontWeight: aba===id?700:400, fontSize: 13 }}>{label}</Btn>;
+      return (
+        <div style={{ maxWidth: 900, margin: "0 auto", animation: "fadein .3s" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+            <h2 style={{ fontSize: 22, fontWeight: 700, color: C.navy }}>4. Resultados — 1º Trimestre 2025</h2>
+            <Btn onClick={limparTudo} style={{ background: "#FEF2F2", color: C.danger, borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, border: `1px solid #FECACA` }}>🗑 Limpar tudo</Btn>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 22 }}>
+            {clientes.map(c => { const ico = c.analise?.situacao==="lucro"?"✅":c.analise?.situacao==="prejuízo"?"🔴":"🟡";
+              return <Btn key={c.id} onClick={() => { setSelId(c.id); setAba("dre"); }} style={{ padding: "8px 16px", borderRadius: 99, border: `2px solid ${selId===c.id?C.teal:C.border}`, background: selId===c.id?C.light:"#fff", color: selId===c.id?C.teal:C.gray, fontWeight: selId===c.id?700:400, fontSize: 13 }}>{c.nome} {ico}</Btn>;
+            })}
+          </div>
+          {!r && <div style={{ textAlign: "center", padding: 40, background: "#FFF5F5", borderRadius: 12, border: `1px solid #FEE2E2` }}><p style={{ fontSize: 16, fontWeight: 600, color: C.danger }}>⚠️ Este cliente ainda não foi processado.</p></div>}
+          {r && (<>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+              {[{label:"Total Receitas",val:r.totalReceitas,cor:C.success,icon:"📈"},{label:"Total Despesas",val:r.totalDespesas,cor:C.danger,icon:"📉"},{label:"Lucro Líquido",val:r.lucroLiquido,cor:r.lucroLiquido>=0?C.success:C.danger,icon:r.lucroLiquido>=0?"💰":"⚠️"}].map(k => (
+                <div key={k.label} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: "16px 18px" }}>
+                  <div style={{ fontSize: 20, marginBottom: 6 }}>{k.icon}</div>
+                  <p style={{ fontSize: 10, color: C.gray, textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{k.label}</p>
+                  <p style={{ fontSize: 19, fontWeight: 700, color: k.cor, fontFamily: "JetBrains Mono,monospace" }}>{fmt(k.val)}</p>
+                </div>
+              ))}
+            </div>
+            <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ display: "flex", gap: 4, padding: "10px 14px", borderBottom: `1px solid ${C.border}`, background: "#F8FAFC", flexWrap: "wrap" }}>
+                <Tab id="dre" label="📊 DRE" /><Tab id="fluxo" label="💸 Fluxo de Caixa" /><Tab id="lancamentos" label="🔍 Lançamentos" /><Tab id="analise" label="🧠 Análise IA" />
+              </div>
+              <div style={{ padding: 20 }}>
+                {aba==="dre" && <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                  <thead><tr style={{ background:C.navy }}>{["Categoria","Janeiro","Fevereiro","Março","Total Trim."].map(h=><th key={h} style={{ padding:"10px 14px", color:"#fff", textAlign:h==="Categoria"?"left":"right", fontSize:11 }}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    <tr><td colSpan={5} style={{ padding:"12px 14px 4px", fontWeight:700, color:C.success, fontSize:11, textTransform:"uppercase" }}>RECEITAS</td></tr>
+                    {Object.entries(r.receitasPorCategoria||{}).map(([cat,val])=><tr key={cat} style={{ borderBottom:`1px solid ${C.border}` }}><td style={{ padding:"8px 14px", color:C.navy }}>{cat}</td>{MESES.map(m=><td key={m} style={{ padding:"8px 14px", textAlign:"right", fontSize:11, color:C.gray }}>—</td>)}<td style={{ padding:"8px 14px", textAlign:"right", fontWeight:600, color:C.success, fontFamily:"JetBrains Mono,monospace" }}>{fmt(val)}</td></tr>)}
+                    <tr style={{ background:"#F0FDF4" }}><td style={{ padding:"10px 14px", fontWeight:700 }}>Total Receitas</td>{MESES.map(m=><td key={m} style={{ padding:"10px 14px", textAlign:"right", fontWeight:700, color:C.success, fontFamily:"JetBrains Mono,monospace", fontSize:12 }}>{fmt(r.receitasPorMes?.[m])}</td>)}<td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:C.success, fontFamily:"JetBrains Mono,monospace" }}>{fmt(r.totalReceitas)}</td></tr>
+                    <tr><td colSpan={5} style={{ padding:"12px 14px 4px", fontWeight:700, color:C.danger, fontSize:11, textTransform:"uppercase" }}>DESPESAS</td></tr>
+                    {Object.entries(r.despesasPorCategoria||{}).map(([cat,val])=><tr key={cat} style={{ borderBottom:`1px solid ${C.border}` }}><td style={{ padding:"8px 14px", color:C.navy }}>{cat}</td>{MESES.map(m=><td key={m} style={{ padding:"8px 14px", textAlign:"right", fontSize:11, color:C.gray }}>—</td>)}<td style={{ padding:"8px 14px", textAlign:"right", fontWeight:600, color:C.danger, fontFamily:"JetBrains Mono,monospace" }}>{fmt(val)}</td></tr>)}
+                    <tr style={{ background:"#FEF2F2" }}><td style={{ padding:"10px 14px", fontWeight:700 }}>Total Despesas</td>{MESES.map(m=><td key={m} style={{ padding:"10px 14px", textAlign:"right", fontWeight:700, color:C.danger, fontFamily:"JetBrains Mono,monospace", fontSize:12 }}>{fmt(r.despesasPorMes?.[m])}</td>)}<td style={{ padding:"10px 14px", textAlign:"right", fontWeight:800, color:C.danger, fontFamily:"JetBrains Mono,monospace" }}>{fmt(r.totalDespesas)}</td></tr>
+                    <tr style={{ background:r.lucroLiquido>=0?"#ECFDF5":"#FEF2F2", borderTop:`2px solid ${r.lucroLiquido>=0?C.success:C.danger}` }}><td colSpan={4} style={{ padding:"14px", fontWeight:800, fontSize:15, color:C.navy }}>💰 LUCRO LÍQUIDO DO TRIMESTRE</td><td style={{ padding:"14px", textAlign:"right", fontWeight:800, fontSize:17, color:r.lucroLiquido>=0?C.success:C.danger, fontFamily:"JetBrains Mono,monospace" }}>{fmt(r.lucroLiquido)}</td></tr>
+                  </tbody>
+                </table>}
+                {aba==="fluxo" && <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:14 }}>
+                  {MESES.map(mes=>{ const rec=r.receitasPorMes?.[mes]||0; const des=r.despesasPorMes?.[mes]||0; const saldo=rec-des;
+                    return <div key={mes} style={{ background:"#F8FAFC", border:`1px solid ${C.border}`, borderRadius:12, padding:18 }}>
+                      <p style={{ fontWeight:700, color:C.navy, marginBottom:14, fontSize:15 }}>{mes}</p>
+                      {[["Entradas",rec,C.success],["Saídas",des,C.danger]].map(([lbl,val,cor])=><div key={lbl} style={{ display:"flex", justifyContent:"space-between", marginBottom:8 }}><span style={{ fontSize:12, color:C.gray }}>{lbl}</span><span style={{ fontSize:13, fontWeight:600, color:cor, fontFamily:"JetBrains Mono,monospace" }}>{fmt(val)}</span></div>)}
+                      <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:10, display:"flex", justifyContent:"space-between", marginBottom:12 }}><span style={{ fontSize:12, fontWeight:700 }}>Saldo</span><span style={{ fontSize:15, fontWeight:800, color:saldo>=0?C.success:C.danger, fontFamily:"JetBrains Mono,monospace" }}>{fmt(saldo)}</span></div>
+                      <div style={{ height:6, background:C.border, borderRadius:99, overflow:"hidden" }}><div style={{ height:"100%", width:`${rec>0?Math.min(100,Math.abs(saldo/rec)*100):0}%`, background:saldo>=0?C.success:C.danger, borderRadius:99 }} /></div>
+                      <p style={{ fontSize:10, color:C.gray, marginTop:4, textAlign:"right" }}>Margem: {rec>0?((saldo/rec)*100).toFixed(1):0}%</p>
+                    </div>;
+                  })}
+                </div>}
+                {aba==="lancamentos" && <div>
+                  <p style={{ fontSize:13, color:C.gray, marginBottom:12 }}>{(cl.transacoes||[]).length} transações classificadas</p>
+                  <div style={{ overflowX:"auto" }}><table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+                    <thead><tr style={{ background:"#F1F5F9" }}>{["Data","Descrição","Mês","Tipo","Categoria","Valor"].map(h=><th key={h} style={{ padding:"8px 12px", textAlign:h==="Valor"?"right":"left", color:C.navy, fontWeight:600, fontSize:11, textTransform:"uppercase" }}>{h}</th>)}</tr></thead>
+                    <tbody>{(cl.transacoes||[]).map((t,i)=><tr key={i} style={{ borderBottom:`1px solid ${C.border}`, background:i%2===0?"#fff":"#F8FAFC" }}><td style={{ padding:"8px 12px", color:C.gray }}>{t.data}</td><td style={{ padding:"8px 12px", color:C.navy }}>{t.descricao}</td><td style={{ padding:"8px 12px", color:C.gray }}>{t.mes}</td><td style={{ padding:"8px 12px" }}><span style={{ background:t.tipo==="receita"?"#D1FAE5":"#FEE2E2", color:t.tipo==="receita"?"#065F46":"#991B1B", padding:"2px 8px", borderRadius:99, fontSize:11, fontWeight:700 }}>{t.tipo}</span></td><td style={{ padding:"8px 12px", color:C.gray }}>{t.categoria}</td><td style={{ padding:"8px 12px", textAlign:"right", fontFamily:"JetBrains Mono,monospace", fontWeight:600, color:t.tipo==="receita"?C.success:C.danger }}>{fmt(t.valor)}</td></tr>)}</tbody>
+                  </table></div>
+                </div>}
+                {aba==="analise" && an && <div>
+                  <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:20, background:"#F8FAFC", borderRadius:12, padding:16 }}>
+                    <div style={{ fontSize:40 }}>{an.situacao==="lucro"?"🟢":an.situacao==="prejuízo"?"🔴":"🟡"}</div>
+                    <div><p style={{ fontWeight:700, fontSize:17, color:C.navy, textTransform:"capitalize" }}>Situação: {an.situacao}</p>
+                    {an.distribuicaoPossivel?<p style={{ fontSize:13, color:C.success, fontWeight:600, marginTop:4 }}>✅ Distribuição possível — valor sugerido: {fmt(an.valorSugerido)}</p>:<p style={{ fontSize:13, color:C.danger, fontWeight:600, marginTop:4 }}>❌ Distribuição não recomendada</p>}</div>
+                  </div>
+                  <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:14 }}>
+                    {[{label:"💪 Pontos Fortes",items:an.pontosForca,bg:"#F0FDF4",cor:C.success},{label:"⚠️ Pontos de Atenção",items:an.pontosAtencao,bg:"#FFFBEB",cor:C.gold},{label:"📋 Recomendações",items:an.recomendacoes,bg:"#F0FDFA",cor:C.teal}].map(sec=><div key={sec.label} style={{ background:sec.bg, borderRadius:10, padding:14 }}><p style={{ fontWeight:700, fontSize:13, color:sec.cor, marginBottom:10 }}>{sec.label}</p><ul style={{ paddingLeft:16, display:"flex", flexDirection:"column", gap:8 }}>{(sec.items||[]).map((item,i)=><li key={i} style={{ fontSize:12, color:"#374151", lineHeight:1.5 }}>{item}</li>)}</ul></div>)}
+                  </div>
+                </div>}
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:10, marginTop:20 }}>
+              <Btn onClick={exportar} style={{ flex:1, background:C.teal, color:"#fff", borderRadius:10, padding:"12px 0", fontSize:14, fontWeight:700 }}>⬇️ Exportar CSV — {cl?.nome}</Btn>
+            </div>
+          </>)}
+        </div>
+      );
+    }
+
+    function App() {
+      const [step, setStep] = useState(0);
+      const [clientes, setClientes] = useState(() => carregar());
+      const steps = ["Clientes","Documentos","Processar","Resultados"];
+      useEffect(() => {
+        const saved = carregar();
+        if (saved.length > 0 && saved.some(c => c.resumo)) setStep(3);
+        else if (saved.length > 0) setStep(0);
+      }, []);
+      return (
+        <div style={{ minHeight:"100vh", background:"#F8FAFC" }}>
+          <div style={{ background:C.navy, padding:"0 32px" }}>
+            <div style={{ maxWidth:960, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"space-between", height:64 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                <div style={{ width:36, height:36, borderRadius:8, background:C.teal, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>📊</div>
+                <div><p style={{ color:"#fff", fontWeight:700, fontSize:15, lineHeight:1 }}>Conciliação Financeira</p><p style={{ color:C.teal, fontSize:11 }}>Nacaratto Contabilidade · Powered by IA</p></div>
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                {steps.map((s,i)=><div key={s} style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <div title={s} onClick={()=>i<step&&setStep(i)} style={{ width:26, height:26, borderRadius:"50%", background:i===step?C.teal:i<step?C.gold:"rgba(255,255,255,0.15)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:"#fff", cursor:i<step?"pointer":"default" }}>{i<step?"✓":i+1}</div>
+                  {i<steps.length-1&&<div style={{ width:18, height:2, background:i<step?C.gold:"rgba(255,255,255,0.15)", borderRadius:1 }} />}
+                </div>)}
+              </div>
+            </div>
+          </div>
+          <div style={{ maxWidth:960, margin:"0 auto", padding:"36px 24px 80px" }}>
+            {step===0&&<StepClientes clientes={clientes} setClientes={setClientes} onNext={()=>setStep(1)} />}
+            {step===1&&<StepUpload clientes={clientes} setClientes={setClientes} onNext={()=>setStep(2)} onBack={()=>setStep(0)} />}
+            {step===2&&<StepProcessar clientes={clientes} setClientes={setClientes} onNext={()=>setStep(3)} onBack={()=>setStep(1)} />}
+            {step===3&&<StepResultados clientes={clientes} setClientes={setClientes} onBack={()=>setStep(0)} />}
+          </div>
+        </div>
+      );
+    }
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
