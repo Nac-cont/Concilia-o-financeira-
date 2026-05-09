@@ -113,7 +113,7 @@ async function callAI(sys,usr){
       body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,system:sys,messages:[{role:"user",content:usr}]})});
     const d=await res.json();if(d.error)return null;
     const raw=(d.content||[]).map(b=>b.text||"").join("");
-    const clean=raw.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+    const clean=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
     try{return JSON.parse(clean);}catch(_){}
     const m=clean.match(/\{[\s\S]*\}/);if(m){try{return JSON.parse(m[0]);}catch(_){}}
     return null;
